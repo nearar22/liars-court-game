@@ -76,64 +76,96 @@ const blockchain = {
 };
 
 // ══════════════════════════════════
-//  REAL-TIME SYNC (THE "REAL" ONLINE)
+//  FIREBASE COORDINATION LAYER
 // ══════════════════════════════════
-// ══════════════════════════════════
-//  REAL-TIME SYNC (THE "REAL" ONLINE)
-// ══════════════════════════════════
-async function syncRoom() {
-    if (state.currentRoomId === null) return;
+const firebaseConfig = {
+  apiKey: "AIzaSyAZALzXYxbE6pvUS-2NrVEmo04iH8AFQAA",
+  authDomain: "liars-court.firebaseapp.com",
+  databaseURL: "https://liars-court-default-rtdb.firebaseio.com",
+  projectId: "liars-court",
+  storageBucket: "liars-court.firebasestorage.app",
+  messagingSenderId: "737991898395",
+  appId: "1:737991898395:web:ae46b1bbedd0f85c190fbe"
+};
 
-    // ✅ Sync directly from the Intelligent Contract (Online for everyone)
-    try {
-        const room = await blockchain.call("get_room", [parseInt(state.currentRoomId)]);
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// ══════════════════════════════════
+//  REAL-TIME SYNC (FIREBASE POWERED)
+// ══════════════════════════════════
+function startPolling() {
+    if (!state.currentRoomId) return;
+    
+    // Listen to real-time updates from Firebase
+    const roomRef = db.ref('rooms/' + state.currentRoomId);
+    roomRef.on('value', (snapshot) => {
+        const room = snapshot.val();
         if (!room) return;
 
-        console.log("Online Sync...", room);
+        console.log("Firebase Sync:", room);
         const oldPhase = state.currentPhase;
         state.roomData = room;
         state.currentPhase = room.phase;
 
-        // 1. Update Header
-        $("#lobbyRoomName").textContent = `Court #${room.id}`;
-        $("#lobbyRoomCode").textContent = room.id;
+        // 1. Update UI
+        $("#lobbyRoomName").textContent = room.name || "Liar's Court";
+        $("#lobbyRoomCode").textContent = state.currentRoomId;
         $("#themeName").textContent = room.theme;
 
-        // 2. Sync Players Grid (Map dict to list for renderer)
-        const playersList = Object.keys(room.players);
+        // 2. Players Grid
+        const playersList = room.players ? Object.values(room.players) : [];
         renderPlayerSlots(playersList, 4);
 
         // 3. Phase Transitions
         if (oldPhase !== state.currentPhase) {
             addLog(`Court moved to <span class="highlight">${state.currentPhase}</span> phase`);
             showPhase(state.currentPhase);
-            if (state.currentPhase === "RESULTS") showResults(room.results, room.winner);
         }
 
-        // 4. Update Start Button (First player is host)
+        // 4. Host logic
         const startBtn = $("#startGameBtn");
-        const isHost = playersList[0]?.toLowerCase() === state.playerAddr.toLowerCase();
-        
-        if (isHost && state.currentPhase === "WAITING") {
+        const isHost = room.host === state.playerAddr;
+        if (isHost && state.currentPhase === "LOBBY") {
             startBtn.disabled = playersList.length < 2;
-            startBtn.textContent = playersList.length < 2 ? `WAITING FOR PLAYERS (${playersList.length}/2)` : "START GAME";
-        } else if (state.currentPhase === "WAITING") {
-            startBtn.disabled = true;
-            startBtn.textContent = "WAITING FOR HOST...";
+            startBtn.textContent = playersList.length < 2 ? "NEED 2+ PLAYERS" : "START GAME";
         } else {
             startBtn.disabled = true;
-            startBtn.textContent = "IN PROGRESS";
+            startBtn.textContent = state.currentPhase === "LOBBY" ? "WAITING FOR HOST..." : "IN PROGRESS";
         }
-
-    } catch (e) {
-        console.error("Sync Error:", e);
-    }
+    });
 }
 
-function startPolling() {
-    if (state.pollingInterval) clearInterval(state.pollingInterval);
-    state.pollingInterval = setInterval(syncRoom, 4000); // Sync every 4s
-    syncRoom();
+function renderPlayerSlots(players = [], max = 4) {
+    const grid = $("#playersGrid");
+    let html = "";
+    const avatars = ["🦊", "🐺", "🦅", "🐲"];
+    
+    for (let i = 0; i < max; i++) {
+        const p = players[i];
+        if (p) {
+            const isYou = p.address?.toLowerCase() === state.playerAddr.toLowerCase();
+            const name = isYou ? "YOU" : (p.name || shortAddr(p.address));
+            html += `
+                <div class="player-slot occupied ${isYou ? 'you' : ''} animate-in">
+                    ${p.address === state.roomData.host ? '<div class="player-badge-you">HOST</div>' : ''}
+                    <div class="player-avatar">${avatars[i % 4]}</div>
+                    <div class="player-name">${name}</div>
+                    <div class="player-status"><span class="status-dot"></span> Online</div>
+                </div>
+            `;
+        } else {
+            html += `
+                <div class="player-slot empty">
+                    <div class="player-avatar">❓</div>
+                    <div class="player-name" style="color: var(--text-dim);">Empty</div>
+                    <div class="player-status" style="color: var(--text-dim);">Waiting for player...</div>
+                </div>
+            `;
+        }
+    }
+    grid.innerHTML = html;
 }
 
 // ══════════════════════════════════
@@ -145,27 +177,42 @@ function closeCreateRoomModal() {
     m.style.display = "none";
 }
 
+function generateRoomCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+}
+
 async function createRoom() {
-    addLog(`Creating room on <span class="highlight">GenLayer</span>... Please wait.`);
+    const name = $("#newRoomName").value.trim() || "Court " + Math.floor(Math.random() * 999);
+    const theme = state.selectedTheme;
+    const code = generateRoomCode();
+
     closeCreateRoomModal();
 
-    try {
-        // 1. Send the transaction
-        await blockchain.write("create_room", [state.playerName]);
-        
-        // 2. Get the latest room ID (since total_rooms increased)
-        const total = await blockchain.call("total_rooms", []);
-        const newId = total - 1;
+    const roomData = {
+        id: code,
+        name: name,
+        theme: theme,
+        phase: "LOBBY",
+        host: state.playerAddr,
+        players: {
+            [state.playerAddr]: {
+                name: state.playerName,
+                address: state.playerAddr
+            }
+        }
+    };
 
-        state.currentRoomId = newId;
-        addLog(`New Court Created! Code: <span class="highlight">${newId}</span>`);
-        addLog(`Share the number <span class="highlight">${newId}</span> with your friends!`);
-        
-        showPhase("LOBBY");
-        startPolling();
-    } catch (e) {
-        alert("Failed to create room: " + e.message);
-    }
+    // Save to Firebase
+    await db.ref('rooms/' + code).set(roomData);
+
+    state.currentRoomId = code;
+    showPhase("LOBBY");
+    startPolling();
+    
+    addLog(`Court <span class="highlight">${name}</span> opened via Firebase!`);
 }
 
 async function joinByCode() {
