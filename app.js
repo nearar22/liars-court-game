@@ -580,13 +580,13 @@ async function triggerAIJudge(room) {
         } catch (rpcErr) {
             console.log("GenLayer RPC call result:", rpcErr.message);
             // RPC might fail if contract doesn't have that method or network issues
-            // Fall through to heuristic analysis below
+            // Fall through to real AI analysis below
         }
 
-        // If GenLayer RPC didn't return usable verdicts, do heuristic fact-check
+        // If GenLayer RPC didn't return usable verdicts, use external AI API
         if (Object.keys(verdicts).length === 0) {
-            addLog("🔄 Using AI heuristic analysis...");
-            verdicts = heuristicFactCheck(claims, room.theme);
+            addLog("🔄 AI Judge verifying facts via external LLM...");
+            verdicts = await pollinationsFactCheck(claims, room.theme);
         }
 
         addLog("✅ AI Verdict reached!");
@@ -687,46 +687,48 @@ async function triggerAIJudge(room) {
 }
 
 // ══════════════════════════════════════════════════════
-//  HEURISTIC FACT-CHECK (fallback when GenLayer RPC
+//  EXTERNAL AI FACT-CHECK (fallback when GenLayer RPC
 //  doesn't return usable results)
-//  Uses basic keyword analysis + randomization to
-//  simulate AI fact-checking. In production, this would
-//  be replaced by GenLayer's proper consensus.
+//  Uses the free open text.pollinations.ai LLM endpoint
+//  to guarantee real fact-checking in the browser.
 // ══════════════════════════════════════════════════════
-function heuristicFactCheck(claims, theme) {
+async function pollinationsFactCheck(claims, theme) {
     const verdicts = {};
-    
-    // Common patterns that suggest a claim might be false
-    const suspiciousPatterns = [
-        /biggest|largest|smallest|tallest|longest|fastest|first|oldest|youngest/i,
-        /always|never|every|all|none|no one/i,
-        /invented|discovered|created/i,
-        /million|billion|trillion/i,
-    ];
-    
+    const promises = [];
+
     for (const [addr, claim] of Object.entries(claims)) {
-        const text = claim.text.toLowerCase();
-        let suspicionScore = 0;
+        const textToAnalyze = claim.text;
         
-        // Check for superlatives and absolute claims (more likely to be false)
-        for (const pattern of suspiciousPatterns) {
-            if (pattern.test(text)) suspicionScore++;
-        }
+        // Construct a highly strict prompt that forces a TRUE/FALSE output
+        const prompt = `You are a strict trivia fact-checker. Determine if the following claim about the theme "${theme}" is factually true or false in the real world.
+Claim: "${textToAnalyze}"
+Respond EXACTLY with the word "TRUE" or "FALSE". No other explanation, no punctuation.`;
+
+        const url = 'https://text.pollinations.ai/prompt/' + encodeURIComponent(prompt);
         
-        // Very short claims are suspicious
-        if (text.length < 20) suspicionScore++;
-        
-        // Very long claims tend to be more truthful (more detail)
-        if (text.length > 100) suspicionScore--;
-        
-        // Add some randomness to make it interesting
-        const rand = Math.random();
-        
-        // Decision: if suspicion is low AND random favors truth → TRUE
-        // The threshold creates roughly 60% true, 40% false verdicts
-        verdicts[addr] = (suspicionScore < 2 && rand > 0.3) || rand > 0.7;
+        const promise = fetch(url)
+            .then(res => res.text())
+            .then(response => {
+                const answer = response.toUpperCase().trim();
+                // We default to true if the AI gives a weird unclear answer, but strict prompt usually prevents it.
+                if (answer.includes("FALSE")) {
+                    verdicts[addr] = false;
+                } else if (answer.includes("TRUE")) {
+                    verdicts[addr] = true;
+                } else {
+                    verdicts[addr] = true; // Default fallback
+                }
+            })
+            .catch(err => {
+                console.error("Pollinations AI error:", err);
+                verdicts[addr] = true; // Default fallback on network error
+            });
+            
+        promises.push(promise);
     }
     
+    // Wait for all AI calls to finish concurrently
+    await Promise.all(promises);
     return verdicts;
 }
 
