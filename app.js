@@ -434,9 +434,13 @@ function showResults(results, winner) {
 
     let html = "";
     for (const [addr, res] of Object.entries(results)) {
+        const declared = res.was_lie ? "🤥 Declared Lie" : "✓ Declared True";
         html += `<tr>
             <td><strong>${res.username || shortAddr(addr)}</strong></td>
-            <td>${res.was_lie ? "🤥 Lie" : "✓ Truth"}</td>
+            <td>
+                <div style="font-size:0.8rem;margin-bottom:6px;line-height:1.4;">"${res.text}"</div>
+                <div style="font-size:0.65rem;color:var(--text-muted);font-weight:600;">${declared}</div>
+            </td>
             <td><span class="verdict ${res.was_caught?'verdict-caught':'verdict-true'}">${res.was_caught?'CAUGHT':'CLEAN'}</span></td>
             <td class="${res.points>=0?'points-positive':'points-negative'}">${res.points>0?'+':''}${res.points}</td>
         </tr>`;
