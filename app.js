@@ -16,11 +16,11 @@
  * for the AI judging step since it's triggered via backend-style RPC).
  */
 
-const RPC_URL          = "https://rpc-bradbury.genlayer.com";
+const RPC_URL          = "https://zksync-os-testnet-genlayer.zksync.dev/";
 const CONTRACT_ADDRESS = "0xc0A588DDa3F6Da4040c3937913997db05F5A81ea";
 const CHAIN_ID_HEX     = "0x107D"; // GenLayer Bradbury = 4221 decimal
 const CHAIN_ID_DEC     = 4221;
-const EXPLORER_URL     = "https://explorer-bradbury.genlayer.com";
+const EXPLORER_URL     = "https://explorer-bradbury.genlayer.com/";
 
 // ── STATE ──────────────────────────────────────────────
 let state = {
