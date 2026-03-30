@@ -13,7 +13,7 @@
  */
 
 const RPC_URL          = "https://rpc-bradbury.genlayer.com";
-const CONTRACT_ADDRESS = "0xc1adF4C73A05FE720746DA8d15803B0DEC588439";
+const CONTRACT_ADDRESS = "0xc0A588DDa3F6Da4040c3937913997db05F5A81ea";
 const CHAIN_ID_HEX     = "0x107D"; // GenLayer Bradbury = 4221 decimal
 const CHAIN_ID_DEC     = 4221;
 
