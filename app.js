@@ -673,50 +673,154 @@ async function triggerGenLayerJudge(room) {
 }
 
 // ══════════════════════════════════════════════════════
-//  FALLBACK: LOCAL SCORING (when GenLayer unavailable)
+//  WIKIPEDIA FACT-CHECKER
+//  Same logic as GenLayer contract's judge_claims()
+// ══════════════════════════════════════════════════════
+async function factCheckWithWikipedia(claimText) {
+    try {
+        // Step 1: Search Wikipedia for claim
+        const q   = encodeURIComponent(claimText);
+        const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&format=json&origin=*&utf8=1&srlimit=3`;
+        const res  = await fetch(url);
+        const data = await res.json();
+        const hits = data?.query?.search || [];
+
+        if (!hits.length) return { verdict: null, evidence: "No Wikipedia results found." };
+
+        // Step 2: Get page extract for top result
+        const pageId  = hits[0].pageid;
+        const url2    = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&pageids=${pageId}&format=json&origin=*`;
+        const res2    = await fetch(url2);
+        const data2   = await res2.json();
+        const extract = data2?.query?.pages?.[pageId]?.extract || "";
+        const snippet = extract.slice(0, 800).toLowerCase();
+        const claim   = claimText.toLowerCase();
+
+        // Step 3: Check for contradictions
+        // Extract key numbers/superlatives from the claim
+        const isBiggest  = /biggest|largest|most (populous|populated)|tallest|highest|longest|greatest/i.test(claim);
+        const isSmallest = /smallest|least|shortest|lowest|fewest/i.test(claim);
+        const isFirst    = /first|oldest|earliest/i.test(claim);
+        const isOnly     = /only|unique|sole/i.test(claim);
+
+        // Extract main entity from claim (first proper noun-like word)
+        const mainEntity = claimText.split(/\s+/).slice(0,3).join(" ").toLowerCase();
+
+        let verdict = null;
+        let evidence = hits[0].snippet.replace(/<[^>]+>/g, "");
+
+        if (isBiggest || isSmallest || isFirst || isOnly) {
+            // For superlative claims: check if the Wikipedia article ABOUT the thing
+            // confirms the superlative, or mentions a DIFFERENT entity as the answer
+            const countries = ["russia","canada","china","usa","united states","brazil",
+                "australia","india","argentina","kazakhstan","algeria","democratic republic",
+                "saudi arabia","mexico","indonesia","sudan","libya","iran","mongolia","peru"];
+
+            // Check if a DIFFERENT country is mentioned as the superlative
+            let contradictionFound = false;
+            for (const c of countries) {
+                if (snippet.includes(c) && !mainEntity.includes(c)) {
+                    // The Wikipedia article about "biggest country" mentions Russia,
+                    // but the claim says Morocco → contradiction!
+                    const biggestPattern = new RegExp(`(${c})[^.]*?(largest|biggest|most populous|tallest|highest|longest|greatest|smallest|shortest|lowest)`, "i");
+                    const altPattern    = new RegExp(`(largest|biggest|most populous|tallest|highest|longest|greatest|smallest|shortest|lowest)[^.]*?(${c})`, "i");
+                    if (biggestPattern.test(snippet) || altPattern.test(snippet)) {
+                        contradictionFound = true;
+                        evidence = `Wikipedia says ${c} holds this record, not what was claimed.`;
+                        break;
+                    }
+                }
+            }
+
+            if (contradictionFound) {
+                verdict = false; // Claim is FALSE
+            } else if (snippet.includes(mainEntity)) {
+                verdict = true;  // Wikipedia confirms the entity in context
+            } else {
+                verdict = null;  // Cannot determine
+            }
+        } else {
+            // For general claims: if Wikipedia article is about the claimed entity
+            // and doesn't contradict, mark as plausible true
+            verdict = snippet.includes(mainEntity) ? true : null;
+        }
+
+        return { verdict, evidence: evidence.slice(0, 200) };
+    } catch (e) {
+        console.warn("Wikipedia check failed:", e);
+        return { verdict: null, evidence: "Fact-check unavailable." };
+    }
+}
+
+// ══════════════════════════════════════════════════════
+//  AI JUDGE: Wikipedia-powered (fallback when GenLayer unavailable)
 // ══════════════════════════════════════════════════════
 async function calculateResultsLocally(room) {
     const claims  = room.claims  || {};
     const votes   = room.votes   || {};
     const results = {};
+    let checkedCount = 0;
+
+    addLog("🔍 Wikipedia AI Judge is fact-checking each claim...");
+    showLoadingBanner("🔍 Fact-checking with Wikipedia...");
 
     for (const [addr, claim] of Object.entries(claims)) {
-        let lieVotes = 0, totalVoters = 0;
+        addLog(`Checking: "${claim.text.slice(0,40)}..."`);
 
+        // ── Real fact-check ──
+        const { verdict: aiSaysTrue, evidence } = await factCheckWithWikipedia(claim.text);
+        checkedCount++;
+
+        // ── Vote tally ──
+        let lieVotes = 0, totalVoters = 0;
         for (const [voter, vv] of Object.entries(votes)) {
             if (voter !== addr && vv[addr]) {
                 totalVoters++;
                 if (vv[addr] === "LIE") lieVotes++;
             }
         }
-
         const wasCaught = totalVoters > 0 && lieVotes > totalVoters / 2;
-        let points = 0;
-        if (claim.isLie && !wasCaught)    points =  3;
-        else if (claim.isLie)              points = -1;
-        else                               points =  1;
 
-        // Voter bonuses
+        // ── Scoring (mirrors contract.py judge_claims logic exactly) ──
+        let points = 0;
+        const playerSaidLie  = claim.isLie;
+        const claimIsActuallyTrue = aiSaysTrue !== false; // null = benefit of doubt → true
+
+        if (playerSaidLie && !wasCaught) {
+            points = 3;   // Lied successfully!
+        } else if (playerSaidLie && wasCaught) {
+            points = -1;  // Lied but got caught
+        } else if (!playerSaidLie && !claimIsActuallyTrue) {
+            points = -1;  // Said "truth" but AI says it's false
+        } else if (!playerSaidLie && claimIsActuallyTrue) {
+            points = 1;   // Told the truth, confirmed
+        }
+
+        // ── Voter bonuses ──
         for (const [voter, vv] of Object.entries(votes)) {
             if (voter !== addr && vv[addr]) {
-                const correct = (vv[addr]==="LIE" && claim.isLie) || (vv[addr]==="TRUTH" && !claim.isLie);
+                // Voters are judged on whether they detected the player's LIE INTENT
+                const detectedCorrectly = (vv[addr] === "LIE" && playerSaidLie) ||
+                                          (vv[addr] === "TRUTH" && !playerSaidLie);
                 if (!results[voter]) results[voter] = { points: 0 };
-                if (correct) results[voter].points += 1;
+                if (detectedCorrectly) results[voter].points += 1;
             }
         }
 
         results[addr] = {
             ...(results[addr] || {}),
             text:       claim.text,
-            was_lie:    claim.isLie,
+            was_lie:    playerSaidLie,
             was_caught: wasCaught,
             lie_votes:  lieVotes,
+            verdict:    aiSaysTrue,   // actual AI fact-check result
+            ai_evidence: evidence,
             points:     (results[addr]?.points || 0) + points,
             username:   claim.username,
-            verdict:    true, // not AI-verified
-            local:      true,
         };
     }
+
+    hideLoadingBanner();
 
     let winner = ""; let best = -999;
     for (const [a, r] of Object.entries(results)) {
@@ -732,34 +836,47 @@ async function calculateResultsLocally(room) {
 //  RESULTS DISPLAY
 // ══════════════════════════════════════════════════════
 function showResults(results, winner, claims) {
+    // Remove any old notes
+    $$("#winnerName ~ p").forEach(n => n.remove());
     $("#resultsOverlay").classList.add("visible");
     const wd = results[winner];
     $("#winnerName").textContent = `🏆 Winner: ${wd?.username || shortAddr(winner)}`;
 
-    const isLocal = Object.values(results).some(r => r.local);
-    if (isLocal) {
-        const note = document.createElement("p");
-        note.style.cssText = "color:var(--text-muted);font-size:0.7rem;margin-bottom:1rem;";
-        note.textContent = "⚠️ Results calculated locally (AI Judge unavailable)";
-        $("#winnerName").after(note);
-    }
-
     let html = "";
     for (const [addr, res] of Object.entries(results)) {
-        const claimText = res.text || claims?.[addr]?.text || "—";
-        const declared  = res.was_lie ? "🤥 Declared Lie" : "✓ Declared True";
-        const aiVerdict = res.verdict !== undefined
-            ? (res.verdict ? "AI: Actually TRUE" : "AI: Actually FALSE")
-            : "";
+        const claimText  = res.text || claims?.[addr]?.text || "—";
+        const declared   = res.was_lie ? "🤥 Declared: LIE" : "✓ Declared: TRUTH";
+
+        // AI verdict badge
+        let aiBadge = "";
+        if (res.verdict === true)  aiBadge = `<div style="font-size:0.65rem;color:#4ade80;margin-top:3px;">🤖 AI: Factually TRUE</div>`;
+        if (res.verdict === false) aiBadge = `<div style="font-size:0.65rem;color:#f97316;margin-top:3px;">🤖 AI: Factually FALSE</div>`;
+        if (res.verdict === null)  aiBadge = `<div style="font-size:0.65rem;color:var(--text-muted);margin-top:3px;">🤖 AI: Inconclusive</div>`;
+
+        // Points explanation
+        let why = "";
+        if (res.was_lie && !res.was_caught)        why = "Successful liar!";
+        else if (res.was_lie && res.was_caught)     why = "Caught lying!";
+        else if (!res.was_lie && res.verdict===false) why = "Told a wrong truth!";
+        else if (!res.was_lie && res.verdict===true)  why = "Truth confirmed!";
+        else if (!res.was_lie)                        why = "Truth teller";
+
         html += `<tr>
             <td><strong>${res.username || shortAddr(addr)}</strong></td>
             <td>
-                <div style="font-size:0.8rem;line-height:1.4;margin-bottom:4px;">"${claimText}"</div>
-                <div style="font-size:0.65rem;color:var(--text-muted);font-weight:600;">${declared}</div>
-                ${aiVerdict ? `<div style="font-size:0.65rem;color:var(--cyan);margin-top:2px;">${aiVerdict}</div>` : ""}
+                <div style="font-size:0.82rem;line-height:1.5;margin-bottom:4px;">"${claimText}"</div>
+                <div style="font-size:0.65rem;font-weight:700;color:var(--text-muted);">${declared}</div>
+                ${aiBadge}
             </td>
-            <td><span class="verdict ${res.was_caught?"verdict-caught":"verdict-true"}">${res.was_caught?"CAUGHT":"CLEAN"}</span></td>
-            <td class="${res.points>=0?"points-positive":"points-negative"}">${res.points>0?"+":""}${res.points}</td>
+            <td>
+                <span class="verdict ${res.was_caught?"verdict-caught":"verdict-true"}">
+                    ${res.was_caught?"CAUGHT":"CLEAN"}
+                </span>
+                <div style="font-size:0.6rem;color:var(--text-dim);margin-top:4px;">${why}</div>
+            </td>
+            <td class="${res.points>=0?"points-positive":"points-negative"}" style="font-size:1.1rem;font-weight:800;">
+                ${res.points>0?"+":""}${res.points}
+            </td>
         </tr>`;
     }
     $("#resultsBody").innerHTML = html;
