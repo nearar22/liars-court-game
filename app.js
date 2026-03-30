@@ -14,7 +14,8 @@
 
 const RPC_URL          = "https://rpc-bradbury.genlayer.com";
 const CONTRACT_ADDRESS = "0xc1adF4C73A05FE720746DA8d15803B0DEC588439";
-const CHAIN_ID         = "0x107d"; // 4221 decimal
+const CHAIN_ID_HEX     = "0x107D"; // GenLayer Bradbury = 4221 decimal
+const CHAIN_ID_DEC     = 4221;
 
 // ── STATE ──────────────────────────────────────────────
 let state = {
@@ -84,57 +85,68 @@ async function encodeCallData(fnSig, args) {
     return { fn: fnSig, args };
 }
 
-async function glWrite(fnName, args) {
-    if (!window.ethereum) throw new Error("No wallet");
-    // Make sure we're on GenLayer Bradbury
+// Ensure wallet is on GenLayer Bradbury before any write
+async function ensureGenLayerNetwork() {
+    const currentChain = await window.ethereum.request({ method: "eth_chainId" });
+    if (currentChain.toLowerCase() === CHAIN_ID_HEX.toLowerCase()) return; // already correct
+
+    addLog("Switching to GenLayer Bradbury...");
     try {
         await window.ethereum.request({
             method: "wallet_switchEthereumChain",
-            params: [{ chainId: CHAIN_ID }],
+            params: [{ chainId: CHAIN_ID_HEX }],
         });
     } catch (e) {
-        if (e.code === 4902) {
+        if (e.code === 4902 || e.code === -32603) {
+            // Chain not added yet — add it
             await window.ethereum.request({
                 method: "wallet_addEthereumChain",
                 params: [{
-                    chainId: CHAIN_ID,
-                    chainName: "GenLayer Bradbury",
+                    chainId: CHAIN_ID_HEX,
+                    chainName: "GenLayer Bradbury Testnet",
                     rpcUrls: [RPC_URL],
                     nativeCurrency: { name: "GEN", symbol: "GEN", decimals: 18 },
+                    blockExplorerUrls: ["https://studio.genlayer.com"],
                 }],
             });
+        } else {
+            throw new Error("Please switch to GenLayer Bradbury Testnet in your wallet.");
         }
     }
+    // Small delay to let MetaMask settle after chain switch
+    await new Promise(r => setTimeout(r, 800));
+}
 
-    // Encode call with GenLayer custom format
-    // GenLayer uses standard EVM encoding via MetaMask
-    const iface = buildCalldata(fnName, args);
+// ABI-encode a GenLayer contract call
+// GenLayer uses standard Solidity ABI encoding for function selectors
+function buildCalldata(fnName, args) {
+    // Function selector: first 4 bytes of keccak256("fnName(types...)")
+    // For GenLayer Python contracts, use their custom encoding:
+    // method_id (4 bytes) + JSON-encoded args
+    // We use a simple approach: encode directly as bytes that GenLayer node understands
+    const payload = JSON.stringify([fnName, ...args]);
+    const bytes   = new TextEncoder().encode(payload);
+    let hex = "0x";
+    for (const b of bytes) hex += b.toString(16).padStart(2, "0");
+    return hex;
+}
 
+async function glWrite(fnName, args) {
+    if (!window.ethereum) throw new Error("No wallet!");
+    await ensureGenLayerNetwork();
+
+    const data = buildCalldata(fnName, args);
     const txHash = await window.ethereum.request({
         method: "eth_sendTransaction",
         params: [{
             from:  state.playerAddr,
             to:    CONTRACT_ADDRESS,
-            data:  iface,
-            gas:   "0x7A120", // 500k
+            data,
+            gas:   "0xC3500", // 800k gas
         }],
     });
     addLog(`TX sent: <span class="highlight">${txHash.slice(0,12)}...</span>`);
     return txHash;
-}
-
-// Simple ABI encoder for GenLayer contract calls
-// GenLayer accepts JSON-encoded calldata for off-chain sim
-function buildCalldata(fnName, args) {
-    // GenLayer RPC accepts a special "sim" format — we use eth_call style
-    // For write calls via MetaMask, GenLayer uses standard ABI encoding
-    // We'll use a lightweight encoder for the supported types
-    const encoder = new TextEncoder();
-    const payload = JSON.stringify({ fn: fnName, args });
-    const bytes = encoder.encode(payload);
-    let hex = "0x";
-    for (const b of bytes) hex += b.toString(16).padStart(2, "0");
-    return hex;
 }
 
 async function pollTxResult(txHash, maxWait = 120000) {
@@ -161,6 +173,50 @@ async function connectWallet() {
     $("#connectWalletBtn").textContent = `⚡ ${state.playerName}`;
     $("#connectWalletBtn").classList.add("connected");
     addLog(`Wallet: <span class="highlight">${state.playerName}</span>`);
+
+    // Check current network
+    const chain = await window.ethereum.request({ method: "eth_chainId" });
+    if (chain.toLowerCase() !== CHAIN_ID_HEX.toLowerCase()) {
+        addLog(`⚠️ Wrong network! Please switch to <span class="highlight">GenLayer Bradbury</span>`);
+        // Show a small warning banner
+        showNetworkWarning();
+    } else {
+        addLog(`✅ On <span class="highlight">GenLayer Bradbury</span>`);
+    }
+
+    // Listen for account/chain changes
+    window.ethereum.on("chainChanged", chainId => {
+        if (chainId.toLowerCase() === CHAIN_ID_HEX.toLowerCase()) {
+            hideNetworkWarning();
+            addLog(`✅ Switched to <span class="highlight">GenLayer Bradbury</span>`);
+        } else {
+            showNetworkWarning();
+        }
+    });
+}
+
+function showNetworkWarning() {
+    let w = $("#networkWarning");
+    if (!w) {
+        w = document.createElement("div");
+        w.id = "networkWarning";
+        w.style.cssText = `position:fixed;top:70px;left:50%;transform:translateX(-50%);
+            background:rgba(244,63,94,0.15);border:1px solid var(--crimson);border-radius:10px;
+            padding:0.6rem 1.2rem;color:var(--crimson);font-size:0.8rem;z-index:300;
+            font-family:var(--font);display:flex;align-items:center;gap:0.75rem;`;
+        w.innerHTML = `⚠️ Wrong network! 
+            <button onclick="ensureGenLayerNetwork()" style="padding:0.3rem 0.8rem;
+                background:var(--crimson);color:#fff;border:none;border-radius:6px;
+                cursor:pointer;font-family:var(--font);font-size:0.75rem;font-weight:600;">
+                Switch to GenLayer
+            </button>`;
+        document.body.appendChild(w);
+    }
+    w.style.display = "flex";
+}
+function hideNetworkWarning() {
+    const w = $("#networkWarning");
+    if (w) w.style.display = "none";
 }
 
 // ══════════════════════════════════════════════════════
