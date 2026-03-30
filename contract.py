@@ -274,28 +274,6 @@ Return ONLY the JSON object."""
     # ═══════════════════════════════════════
 
     @gl.public.view
-    def judge_claims_batch(self, theme: str, claims: str) -> str:
-        """
-        Stateless AI fact-checker view function.
-        Used by the frontend to do read-only AI validation on GenLayer.
-        """
-        batch_prompt = f"""You are a strict trivia fact-checker. 
-THEME: {theme}
-CLAIMS TO CHECK:
-{claims}
-
-Determine if each claim is factually true or false in the real world.
-Respond with a JSON object where keys are the player addresses/names provided, and values are booleans (true for factually true, false for factually false).
-Example: {{"0xAddr1": true, "0xAddr2": false}}
-Return ONLY valid JSON."""
-
-        verdicts_json = gl.eq_principle.prompt_non_comparative(
-            batch_prompt,
-            expected_type=str,
-        )
-        return verdicts_json
-
-    @gl.public.view
     def get_room(self, room_id: int) -> str:
         """Get room data (hides is_lie from claims during active game)."""
         room = json.loads(self.rooms[room_id])
