@@ -160,15 +160,67 @@ function renderPlayerSlots(players = [], max = 4) {
 // ══════════════════════════════════
 //  GAME ACTIONS
 // ══════════════════════════════════
+function closeCreateRoomModal() {
+    const m = $("#createRoomModal");
+    m.classList.remove("visible");
+    m.style.display = "none";
+}
+
+function generateRoomCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+}
+
 async function createRoom() {
-    const name = $("#newRoomName").value.trim();
+    const name = $("#newRoomName").value.trim() || "Court " + Math.floor(Math.random() * 999);
     const theme = state.selectedTheme;
-    
-    const tx = await blockchain.write("create_room", [state.playerName]);
-    // In a real app, we'd wait for receipt, then get ID
-    state.currentRoomId = 0; // Use room 0 for demo
-    
+    const maxPlayers = parseInt($("#maxPlayersSelect").value) || 4;
+    const code = generateRoomCode();
+
+    // Close modal immediately
     closeCreateRoomModal();
+
+    // Build local room state right away — no waiting for blockchain
+    state.currentRoomId = code;
+    state.roomData = {
+        id: code,
+        name: name,
+        theme: theme,
+        max_players: maxPlayers,
+        phase: "LOBBY",
+        players: [state.playerAddr || "0xYOU"],
+        host: state.playerAddr || "0xYOU"
+    };
+
+    // Update UI immediately
+    $("#lobbyRoomName").textContent = name;
+    $("#lobbyRoomCode").textContent = code;
+    $("#themeName").textContent = theme;
+    const themeEmojis = { Geography:"🌍", History:"📜", Science:"🔬", Sports:"⚽", Technology:"💻", Random:"🎲" };
+    $(".theme-icon").textContent = themeEmojis[theme] || "🌍";
+
+    // Update start button
+    const startBtn = $("#startGameBtn");
+    startBtn.disabled = true;
+    startBtn.textContent = "NEED 2+ PLAYERS";
+
+    // Render player slots
+    renderPlayerSlots([state.playerAddr || "0xYOU"], maxPlayers);
+
+    // Show the lobby
+    showPhase("LOBBY");
+
+    addLog(`Court <span class="highlight">${name}</span> opened! Code: <span class="highlight">${code}</span>`);
+    addLog(`Share code <span class="highlight">${code}</span> with friends to join!`);
+
+    // Send TX to blockchain in background (non-blocking)
+    blockchain.write("create_room", [name, theme, maxPlayers]).then(tx => {
+        if (tx) addLog(`TX confirmed: <span class="highlight">${tx.hash.substring(0,12)}...</span>`);
+    });
+
+    // Start polling for new players joining
     startPolling();
 }
 
