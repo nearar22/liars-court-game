@@ -558,7 +558,8 @@ async function triggerAIJudge(room) {
                 
                 const glClient = window.GenLayerBridge.createClient({
                     chain: window.GenLayerBridge.chains.testnetBradbury,
-                    account: state.account,
+                    transport: window.GenLayerBridge.custom(window.ethereum),
+                    account: state.playerAddr,
                 });
                 
                 addLog("⛓️ Sending AI judge transaction to GenLayer validators...");
@@ -615,7 +616,8 @@ async function triggerAIJudge(room) {
                 }
             } catch (glErr) {
                 console.error("GenLayer SDK error:", glErr);
-                addLog("⚠️ GenLayer consensus failed, using backup AI...");
+                addLog(`⚠️ GenLayer failed to prompt Wallet: ${glErr.message.substring(0, 100)}`);
+                addLog("⚠️ Using backup AI instead...");
             }
         }
         
