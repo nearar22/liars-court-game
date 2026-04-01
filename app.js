@@ -577,7 +577,7 @@ async function triggerAIJudge(room) {
                 const receipt = await glClient.waitForTransactionReceipt({
                     hash: txHash,
                     status: "ACCEPTED",
-                    retries: 60,
+                    retries: 9,
                     interval: 5000,
                 });
                 
