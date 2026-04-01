@@ -914,6 +914,21 @@ function hideLoadingBanner() {
 // ══════════════════════════════════════════════════════
 function showPhase(phase) {
     state.currentPhase = phase;
+    
+    // Toggle welcome screen vs room UI
+    if (phase === "NONE" || !state.currentRoomId) {
+        $("#welcomeSection").style.display = "block";
+        $("#phaseBar").style.display = "none";
+        $("#themeBanner").style.display = "none";
+        ["roomLobby","claimSection","votingSection","judgingSection","waitingSection"]
+            .forEach(s => { const el = $(`#${s}`); if(el) el.style.display = "none"; });
+        return;
+    } else {
+        $("#welcomeSection").style.display = "none";
+        $("#phaseBar").style.display = "flex";
+        $("#themeBanner").style.display = "flex";
+    }
+
     const map = {
         LOBBY:    "roomLobby",
         CLAIMING: "claimSection",
@@ -923,7 +938,7 @@ function showPhase(phase) {
     };
     const active = map[phase] || "waitingSection";
     ["roomLobby","claimSection","votingSection","judgingSection","waitingSection"]
-        .forEach(s => $(`#${s}`).style.display = s === active ? "block" : "none");
+        .forEach(s => { const el = $(`#${s}`); if(el) el.style.display = s === active ? "block" : "none"; });
 
     $$(".phase-step").forEach(s => {
         s.classList.remove("active","completed");
@@ -1019,8 +1034,7 @@ function setupEventListeners() {
         state.roomData = null;
         state.isHost = false;
         
-        $("#roomInterface").style.display = "none";
-        $("#listInterface").style.display = "block";
+        showPhase("NONE");
         loadRoomList();
     };
 
@@ -1047,7 +1061,7 @@ document.addEventListener("DOMContentLoaded", () => {
     loadRoomList();
     loadLeaderboard();
     addLog(`Bradbury Testnet <span class="highlight">GenLayer Engine</span> Ready.`);
-    showPhase("LOBBY");
+    showPhase("NONE");
 });
 
 // ══════════════════════════════════════════════════════

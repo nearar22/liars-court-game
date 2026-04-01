@@ -67,8 +67,16 @@
         <!-- ═══════ GAME AREA ═══════ -->
         <main class="game-area" id="gameArea">
 
+            <!-- PHASE: WELCOME (Not in a room) -->
+            <section class="welcome-section animate-in" id="welcomeSection" style="text-align:center; padding-top:4rem; margin-top:2rem;">
+                <div class="welcome-icon" style="font-size:4.5rem; filter:drop-shadow(0 0 20px var(--gold-glow)); margin-bottom:1.5rem; animation: float 6s ease-in-out infinite;">⚖️</div>
+                <h1 style="font-size:clamp(2.5rem, 4vw, 3.5rem); color:var(--text); margin-bottom:1rem; font-weight:800; letter-spacing:-1px;">Welcome to <span style="color:var(--gold);">Liar's Court</span></h1>
+                <p style="color:var(--text-muted); max-width:600px; margin:0 auto 2rem auto; font-size:1.15rem; line-height:1.6;">Join an active court or create a new one to test your deception skills against the <strong style="color:var(--cyan);">GenLayer AI Judge</strong>. Are you a truth-teller or a master liar?</p>
+                <div style="display:inline-block; border-radius:30px; padding:0.5rem 1.5rem; background:var(--bg-card); border:1px solid var(--border); font-size:0.9rem; font-weight:600; color:var(--text-dim);"><span style="color:var(--emerald);">●</span> Optimistic Democracy Powered</div>
+            </section>
+
             <!-- Phase Progress -->
-            <div class="phase-bar" id="phaseBar">
+            <div class="phase-bar" id="phaseBar" style="display:none;">
                 <div class="phase-step" data-phase="LOBBY">🏛️ Lobby</div>
                 <div class="phase-step" data-phase="CLAIMING">📝 Claim</div>
                 <div class="phase-step" data-phase="VOTING">🗳️ Vote</div>
@@ -77,7 +85,7 @@
             </div>
 
             <!-- Theme -->
-            <div class="theme-banner" id="themeBanner">
+            <div class="theme-banner" id="themeBanner" style="display:none;">
                 <div class="theme-icon">🌍</div>
                 <div>
                     <div class="theme-label">This Round's Theme</div>
@@ -86,7 +94,7 @@
             </div>
 
             <!-- PHASE: ROOM LOBBY (Players waiting) -->
-            <section class="room-lobby animate-in" id="roomLobby">
+            <section class="room-lobby animate-in" id="roomLobby" style="display:none;">
                 <div class="room-header">
                     <div class="room-header-left">
                         <h2 id="lobbyRoomName">Waiting for Court...</h2>
@@ -96,7 +104,7 @@
                         </div>
                     </div>
                     <div style="display:flex;gap:0.8rem;align-items:center;">
-                        <button class="leave-btn" id="leaveRoomBtn" style="background:transparent;border:1px solid var(--crimson);color:var(--crimson);border-radius:6px;cursor:pointer;padding:0.6rem 1rem;font-size:0.9rem;font-weight:700;">LEAVE</button>
+                        <button class="leave-btn" id="leaveRoomBtn" style="background:transparent;border:1px solid var(--crimson);color:var(--crimson);border-radius:6px;cursor:pointer;padding:0.6rem 1rem;font-size:0.9rem;font-weight:700;transition:all 0.2s;">LEAVE</button>
                         <button class="start-game-btn" id="startGameBtn" disabled>START GAME</button>
                     </div>
                 </div>
@@ -121,19 +129,19 @@
             </section>
 
             <!-- PHASE: VOTING -->
-            <section id="votingSection" style="display:none;">
+            <section id="votingSection" style="display:none;" class="animate-in">
                 <div class="claims-grid" id="claimsGrid">
                     <!-- Claim cards injected via JS -->
                 </div>
-                <button class="submit-claim-btn" id="submitVotesBtn" style="margin-top:1rem;">SUBMIT VERDICT</button>
+                <button class="submit-claim-btn" id="submitVotesBtn" style="margin-top:1.5rem;">SUBMIT VERDICT</button>
             </section>
 
             <!-- PHASE: JUDGING -->
-            <section id="judgingSection" style="display:none;">
-                <div class="card" style="text-align:center; padding: 3rem;">
+            <section id="judgingSection" style="display:none;" class="animate-in">
+                <div class="card" style="text-align:center; padding: 4rem; border-color:var(--gold); box-shadow:0 0 50px var(--gold-glow);">
                     <div class="spinner"></div>
-                    <p class="waiting-text" id="judgingLoadingText">GenLayer Validators are thinking... 🧠</p>
-                    <p class="waiting-text" style="margin-top:0.5rem; font-size:0.75rem;">Reaching LLM Consensus via Equivalence Principle (This may take a minute! ⏳)</p>
+                    <p class="waiting-text" id="judgingLoadingText" style="color:var(--gold); font-size:1.3rem;">GenLayer Validators are thinking... 🧠</p>
+                    <p class="waiting-text" style="margin-top:0.8rem; font-size:0.9rem; color:var(--text-muted);">Reaching LLM Consensus via Equivalence Principle (this may take up to 45s! ⏳)</p>
                 </div>
             </section>
 

@@ -58,6 +58,18 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--text-dim); border-radius: 3px; }
 
+@keyframes float {
+    0%   { transform: translateY(0px) rotate(0deg); }
+    50%  { transform: translateY(-15px) rotate(2deg); filter: drop-shadow(0 0 35px var(--gold-glow)); }
+    100% { transform: translateY(0px) rotate(0deg); }
+}
+
+@keyframes pulseGlow {
+    0% { box-shadow: 0 0 10px var(--gold-glow); }
+    50% { box-shadow: 0 0 25px var(--gold); }
+    100% { box-shadow: 0 0 10px var(--gold-glow); }
+}
+
 /* ══════════════════
    HEADER
    ══════════════════ */
@@ -361,17 +373,35 @@ body {
     padding: 0.6rem 2rem;
     background: linear-gradient(135deg, var(--emerald), #059669);
     color: #fff;
-    border: none;
+    border: 1px solid rgba(255,255,255,0.1);
     border-radius: var(--radius-sm);
     font-family: var(--font);
-    font-weight: 600;
+    font-weight: 700;
     font-size: 0.85rem;
     cursor: pointer;
     transition: var(--transition);
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
+    box-shadow: 0 0 10px rgba(52, 211, 153, 0.2);
+    text-transform: uppercase;
 }
-.start-game-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 20px var(--emerald-glow); }
-.start-game-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.start-game-btn:hover:not(:disabled) { 
+    transform: translateY(-2px) scale(1.03); 
+    box-shadow: 0 8px 25px var(--emerald-glow), inset 0 0 15px rgba(255,255,255,0.2); 
+    border-color: rgba(255,255,255,0.4);
+}
+.start-game-btn:disabled { 
+    opacity: 0.4; 
+    cursor: not-allowed; 
+    transform: none; 
+    box-shadow: none; 
+    filter: grayscale(0.8);
+}
+
+.leave-btn:hover {
+    background: rgba(244, 63, 94, 0.1) !important;
+    box-shadow: 0 0 15px var(--crimson-glow);
+    transform: translateY(-2px);
+}
 
 /* Players Grid */
 .players-grid {
