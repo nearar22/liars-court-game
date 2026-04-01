@@ -735,13 +735,13 @@ async function pollinationsFactCheck(claims, theme) {
         const text = claim.text;
         
         // Chain-of-thought prompt: forces the AI to reason FIRST, then conclude.
-        // This prevents double-negative confusion (e.g. "didn't win" being marked TRUE).
-        const prompt = `A player in a trivia game made this statement about the topic "${theme}":
+        // This prevents double-negative confusion and avoids being overly pedantic.
+        const prompt = `A player in a fun, casual trivia game made this statement about "${theme}":
 "${text}"
 
-Step 1: What is the real-world fact?
-Step 2: Does the player's statement match the real-world fact?
-Step 3: Write your final answer as VERDICT: TRUE (if the statement matches reality) or VERDICT: FALSE (if the statement does NOT match reality).`;
+Step 1: What is the general common knowledge fact?
+Step 2: Is the player's statement fundamentally true and aligned with public perception? (Be lenient on minor technicalities, focus on the core gist).
+Step 3: Write your final answer as VERDICT: TRUE (if it generally matches reality) or VERDICT: FALSE (if it's a blatant lie or completely wrong).`;
 
         const url = 'https://text.pollinations.ai/prompt/' + encodeURIComponent(prompt) + '?model=openai';
         
