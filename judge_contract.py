@@ -23,15 +23,17 @@ class LiarsCourtJudge(gl.Contract):
         Saves JSON string to state.
         """
         def ask_llm() -> str:
-            prompt = f"""You are a strict fact-checker for a trivia game.
+            prompt = f"""You are an expert fact-checker for a trivia game.
 THEME: {theme}
 
-CLAIMS:
+CLAIMS TO EVALUATE:
 {claims_text}
 
-For each claim, determine if it is factually TRUE or FALSE.
-Respond ONLY with a JSON object where keys are the claim identifiers and values are booleans (true/false).
-No markdown, no explanation, ONLY valid JSON."""
+Analyze each claim individually.
+- If a claim is historically, scientifically, mathematically, and factually TRUE, assign it 'true'.
+- If a claim contains errors, is a lie, contradicts established facts, or is factually incorrect, assign it 'false'.
+Respond ONLY with a valid JSON object where keys are the claim identifiers exactly as provided, and values are the boolean results (true/false).
+No markdown formatting, no explanations, ONLY raw JSON."""
             raw = gl.nondet.exec_prompt(prompt)
             raw = raw.replace("```json", "").replace("```", "").strip()
             parsed = json.loads(raw)

@@ -732,44 +732,50 @@ async function pollinationsFactCheck(claims, theme) {
     const verdicts = {};
 
     for (const [addr, claim] of Object.entries(claims)) {
-        const textToAnalyze = claim.text;
+        const text = claim.text;
         
-        // Strict prompt preventing hallucination
-        const prompt = `You are a strict trivia fact-checker. Determine if the following claim about the theme "${theme}" is factually true or false in the real world.
-Claim: "${textToAnalyze}"
-Respond EXACTLY with the word "TRUE" or "FALSE". No other explanation, no punctuation.`;
+        // Chain-of-thought prompt: forces the AI to reason FIRST, then conclude.
+        // This prevents double-negative confusion (e.g. "didn't win" being marked TRUE).
+        const prompt = `A player in a trivia game made this statement about the topic "${theme}":
+"${text}"
 
-        // We don't specify the model to use the default robust one
-        const url = 'https://text.pollinations.ai/prompt/' + encodeURIComponent(prompt);
+Step 1: What is the real-world fact?
+Step 2: Does the player's statement match the real-world fact?
+Step 3: Write your final answer as VERDICT: TRUE (if the statement matches reality) or VERDICT: FALSE (if the statement does NOT match reality).`;
+
+        const url = 'https://text.pollinations.ai/prompt/' + encodeURIComponent(prompt) + '?model=openai';
         
         try {
-            console.log("AI checking claim:", textToAnalyze);
+            console.log("AI checking claim:", text);
             const res = await fetch(url);
             
             if (!res.ok) {
-                console.error("AI API returned status:", res.status);
-                verdicts[addr] = false; // Safest default for weird AI outputs
+                console.error("AI API status:", res.status);
+                verdicts[addr] = false;
                 continue;
             }
             
             const responseText = await res.text();
             console.log("AI Response for", addr, ":", responseText);
             
-            const answer = responseText.toUpperCase().trim();
-            if (answer.includes("FALSE")) {
+            // Extract the VERDICT line from the chain-of-thought response
+            const upper = responseText.toUpperCase();
+            const vidx = upper.lastIndexOf("VERDICT:");
+            if (vidx !== -1) {
+                const after = upper.substring(vidx + 8).trim();
+                verdicts[addr] = after.startsWith("TRUE");
+            } else if (upper.includes("FALSE")) {
                 verdicts[addr] = false;
-            } else if (answer.includes("TRUE")) {
+            } else if (upper.includes("TRUE")) {
                 verdicts[addr] = true;
             } else {
-                verdicts[addr] = false; // Safest default for weird AI outputs
+                verdicts[addr] = false;
             }
             
-            // Wait a small bit to avoid rate limits on the free API
             await new Promise(r => setTimeout(r, 600));
             
         } catch (err) {
-            console.error("Pollinations AI network error:", err);
-            // Defaulting to FALSE so we don't accidentally reward lying if API is down
+            console.error("Pollinations AI error:", err);
             verdicts[addr] = false; 
         }
     }
