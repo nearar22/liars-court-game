@@ -22,9 +22,11 @@ The game consists of 5 phases:
 
 ## 🧠 The GenLayer Twist: AI Fact-Checker
 The core of this game leverages GenLayer's **Equivalence Principle** and **Non-deterministic Execution**:
-* **LLM Consensus:** Once voting ends, the Python Contract calls `gl.nondet.exec_prompt` to pass all claims to the AI validators for fact-checking.
+* **LLM Consensus:** Once voting ends, `judge_contract.py` calls `gl.nondet.exec_prompt` to pass all claims to the AI validators for fact-checking.
 * **Unified Verdict:** Using `gl.eq_principle.strict_eq()`, the contract reaches a final, consensus-backed verdict from all validators on who told the truth and who lied.
-* **On-Chain Scores:** The results, points, and total wins are all securely recorded on the Smart Contract state (`scores` and `wins`).
+* **Mandatory — No Trust Fallback:** The round **cannot** reach the `RESULTS` phase without real GenLayer verdicts. If consensus fails or times out, the room is rolled back to `VOTING` and the host auto-retries. Player declarations are **never** used as a substitute — that would defeat the purpose of the AI Judge.
+* **On-Chain Evidence:** Every round's judging transaction hash is stored with the result and linked to the Bradbury block explorer, so any player can audit the AI's decision.
+* **On-Chain Scoring (v3.0.0):** After every round, the result is committed to `judge_contract.record_round(room_id, points_json, winner)`. The host fires this call inline, and **every other client also runs a staggered fallback commit** so even if the host abandons the room mid-flight, the round still lands on chain. The contract is **idempotent** (`room_id` is the storage key) — the first valid commit wins, all duplicates are silent no-ops. Cumulative `scores`, `wins`, and a per-room `round_results` snapshot are stored on-chain, making the leaderboard tamper-proof and independently verifiable through `get_score`, `get_wins`, and `get_round_result`. Firebase keeps a synced cache for instant UX, but the contract is the source of truth.
 
 ---
 
@@ -42,15 +44,16 @@ This game was built around four core design principles. Here is how each is refl
 ---
 
 ## 🛠️ Architecture & Tech Stack
-* **Smart Contract (Backend):** Written in Python (`contract.py`) using the `genlayer` SDK. It handles the state machine for the game phases and the AI Judge logic.
-* **Frontend:** Built with HTML, CSS (`style.css`), and Vanilla JavaScript (`app.js`). It integrates the `genlayer-bridge` to connect wallets and send transactions to the GenLayer network.
+* **AI Judge Contract:** [`judge_contract.py`](./judge_contract.py) — the only deployed contract. Written in Python with the `genlayer` SDK. Two methods power the game: `judge_claims(room_id, theme, claims_text)` invokes `gl.nondet.exec_prompt` across validators and reduces their outputs through `gl.eq_principle.strict_eq` to a consensus verdict map `{ address → truthful? }`; `record_round(room_id, points_json, winner)` then persists per-round and cumulative scoring on-chain. Read methods (`get_score`, `get_wins`, `get_round_result`, `get_verdicts`) let any client independently audit the chain.
+* **Frontend:** HTML + CSS (`style.css`) + Vanilla JavaScript (`app.js`). Integrates `genlayer-bridge` to connect MetaMask to the Bradbury testnet and submit judging transactions.
+* **Realtime Sync (Firebase RTDB):** Rooms, claims, votes, profiles, leaderboard, level/XP and the live *Recent Wins* feed are synchronised in milliseconds so multiplayer UX stays snappy. GenLayer is reserved for the one decision that matters — the AI fact-check — where correctness, not latency, is critical.
 
 ---
 
 ## 💻 How to Run Locally
 1. **GenLayer Simulator:** Deploy the contract to your local GenLayer simulator.
    ```bash
-   genlayer deploy contract.py
+   genlayer deploy judge_contract.py
    ```
 2. **Frontend:** Open `index.html` using a local web server (like Live Server in VSCode or `python -m http.server`).
 

@@ -21,3 +21,17 @@ test_*.mjs
 # OS / logs
 *.log
 npm-debug.log*
+
+# 🔐 NEVER commit keys
+*-key.json
+*keystore*
+*.pem
+*.key
+nearar_dev.json
+deployer-key.json
+exported.json
+decrypt-key.js
+*.bundle.js
+
+# npm artifacts (vanilla HTML game — no runtime deps)
+package-lock.json

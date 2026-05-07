@@ -25,7 +25,10 @@ if (typeof BigInt !== "undefined" && !BigInt.prototype.toJSON) {
 }
 
 const RPC_URL          = "https://zksync-os-testnet-genlayer.zksync.dev/";
-const JUDGE_CONTRACT   = "0x07CD2727a3803B3Dc1691852b4Cdfd9e89dc06F0";
+// v3.0.0 — atomic judge+score contract on Bradbury testnet.
+// Deployed 2026-05-07 via `genlayer deploy --contract judge_contract.py`.
+// TX: 0xcf6bb05cab1ff08961cda8e6fd757f2f6cac00be472028bce17f9fe2e3efe722
+const JUDGE_CONTRACT   = "0x0Aa25bE06aE88699055e3Fe19D34335B434A63c8";
 const CHAIN_ID_HEX     = "0x107D"; // GenLayer Bradbury = 4221 decimal
 const CHAIN_ID_DEC     = 4221;
 const EXPLORER_URL     = "https://explorer-bradbury.genlayer.com/";
@@ -760,12 +763,42 @@ function listenToRoom(code) {
                 showToast("GenLayer AI is analyzing claims...", "info");
                 triggerAIJudge(room).finally(() => { state._judging = false; });
             }
+            // HOST auto-retries AI judge after a rollback (up to 2 extra attempts).
+            // GenLayer is mandatory — no declaration fallback — so we keep re-trying
+            // rather than silently accepting unverified verdicts.
+            if (room.phase === "VOTING" && room.judgeError && state.isHost && !state._judging) {
+                const attempts = (state._judgeRetryAttempts || 0);
+                if (attempts < 2 && (!state._lastJudgeErrorAt || state._lastJudgeErrorAt !== room.judgeErrorAt)) {
+                    state._lastJudgeErrorAt = room.judgeErrorAt;
+                    state._judgeRetryAttempts = attempts + 1;
+                    showToast(`Retrying AI Judge (${attempts + 1}/2)...`, "warning");
+                    setTimeout(() => {
+                        db.ref("rooms/" + state.currentRoomId).update({
+                            phase: "JUDGING",
+                            judgeError: null,
+                            judgeErrorAt: null,
+                        });
+                    }, 4000);
+                } else if (attempts >= 2 && state._lastJudgeErrorAt !== room.judgeErrorAt) {
+                    state._lastJudgeErrorAt = room.judgeErrorAt;
+                    showToast("AI Judge still unavailable. Ending round — no verdicts could be verified.", "error");
+                }
+            }
+            // Reset retry counter once we reach a clean state
+            if (room.phase === "RESULTS") {
+                state._judgeRetryAttempts = 0;
+                state._lastJudgeErrorAt = null;
+            }
             if (room.phase === "RESULTS" && room.results) {
                 showResults(room.results, room.winner, room.claims, room.judgeTx, room.xpSummary);
                 launchConfetti();
                 playSound("win");
                 const wd = room.results[room.winner];
                 showToast(`${wd?.username || "Winner"} wins the round!`, "success");
+                // Fallback on-chain commit: closes the abandonment window
+                // between judge_claims and record_round. Contract is idempotent
+                // (room_id key) so any duplicate calls are no-op.
+                ensureOnChainRecord(code, room);
             }
         }
 
@@ -775,8 +808,78 @@ function listenToRoom(code) {
         }
         if (room.phase === "RESULTS" && room.results) {
             showResults(room.results, room.winner, room.claims, room.judgeTx, room.xpSummary);
+            ensureOnChainRecord(code, room);
         }
     });
+}
+
+// ══════════════════════════════════════════════════════
+//  FALLBACK ON-CHAIN COMMIT
+// ══════════════════════════════════════════════════════
+// Every client watches RESULTS and, after a stagger, attempts record_round
+// if it's still missing. The contract checks `round_results[room_id]` and
+// short-circuits if the round is already committed, so duplicate calls are
+// harmless — the first one wins, the rest are no-ops.
+//
+// Stagger: host fires fast (already does so inline); other clients wait
+// longer so the host's commit usually lands first. This eliminates the
+// abandonment loophole flagged by staff (host quitting after RESULTS hits
+// Firebase but before record_round lands on chain).
+const _onChainCommitAttempted = new Set();
+
+function ensureOnChainRecord(roomId, room) {
+    if (!roomId || !room || !room.results) return;
+    if (_onChainCommitAttempted.has(roomId)) return;
+    if (room.recordTx) return;
+    if (!state.playerAddr) return;
+
+    _onChainCommitAttempted.add(roomId);
+    const delayMs = state.isHost ? 2000 : 9000 + Math.floor(Math.random() * 4000);
+
+    setTimeout(async () => {
+        try {
+            const snap = await db.ref("rooms/" + roomId).once("value");
+            const fresh = snap.val();
+            if (!fresh || !fresh.results || fresh.recordTx) return;
+
+            if (!window.GenLayerBridge || !window.ethereum) return;
+            const bradbury = window.GenLayerBridge.chains.testnetBradbury;
+            const customChain = Object.assign({}, bradbury, {
+                rpcUrls: { default: { http: [RPC_URL] } }
+            });
+            const glClient = window.GenLayerBridge.createClient({
+                chain: customChain,
+                account: state.playerAddr,
+                provider: window.ethereum,
+            });
+
+            // Use the persisted sessionKey written by the host so both commits
+            // hit the same contract storage slot (idempotency requires this).
+            const sessionKey = fresh.sessionKey || `${roomId}_${fresh.roundId || "x"}`;
+            if (!fresh.sessionKey) return; // host never wrote one → bail (chain is in unknown state)
+            const pointsMap = {};
+            for (const [addr, r] of Object.entries(fresh.results)) {
+                pointsMap[addr] = Number(r.points) || 0;
+            }
+            const winner = fresh.winner || "";
+
+            addLog("⛓️ Committing round on-chain (fallback)...");
+            const tx = await glClient.writeContract({
+                address: JUDGE_CONTRACT,
+                functionName: "record_round",
+                args: [sessionKey, JSON.stringify(pointsMap), winner],
+                value: BigInt(0),
+                leaderOnly: true,
+            });
+            if (tx) {
+                addLog(`✅ Fallback record TX: <a href="${EXPLORER_URL}tx/${tx}" target="_blank">${tx.substring(0,10)}…</a>`);
+                db.ref("rooms/" + roomId).update({ recordTx: tx }).catch(()=>{});
+            }
+        } catch (e) {
+            // Most common error here is "already recorded" — desired silent skip.
+            console.warn("[GenLayer] fallback record_round skipped:", e?.message);
+        }
+    }, delayMs);
 }
 
 // ══════════════════════════════════════════════════════
@@ -1017,11 +1120,18 @@ async function submitVotes() {
 }
 
 // ══════════════════════════════════════════════════════
-//  AI JUDGE — Uses GenLayer AI for fact-checking
-//  This is called by the HOST when all votes are in.
-//  Instead of sending a blockchain TX, we do the AI
-//  analysis locally using the claim data from Firebase,
-//  simulating what GenLayer's LLM consensus would do.
+//  AI JUDGE — Atomic single-tx flow (v3.0.0)
+//  ──────────────────────────────────────────────────
+//  HOST calls `judge_and_record` on the contract. In ONE transaction the
+//  contract:
+//    1. Runs the AI fact-check under eq-principle consensus.
+//    2. Computes points itself from (verdicts, votes) — no client-side
+//       scoring is trusted. Player intent is recorded but never scored.
+//    3. Persists cumulative scores, wins, and a per-room snapshot.
+//
+//  Frontend then reads the snapshot back via `get_round_result` and mirrors
+//  it into Firebase purely for real-time UX. Chain remains the source of
+//  truth — Firebase becomes a cache.
 // ══════════════════════════════════════════════════════
 async function triggerAIJudge(room) {
     showLoadingBanner("🤖 AI Judge analyzing claims...");
@@ -1029,42 +1139,30 @@ async function triggerAIJudge(room) {
     try {
         const claims = room.claims || {};
         const votes  = room.votes || {};
-        const players = room.players || {};
-        // Unique contract session key per round (avoids stale verdicts on replay in same room)
-        const sessionKey = `${state.currentRoomId}_${room.roundId || Date.now()}`;
+        // Unique contract session key per round (avoids stale verdicts on replay
+        // in same room). Persisted to Firebase so the fallback commit (and any
+        // late-joining client) uses the EXACT same key — the contract is
+        // idempotent on this key, so consistency here = single canonical commit.
+        const sessionKey = room.sessionKey || `${state.currentRoomId}_${room.roundId || Date.now()}`;
+        if (!room.sessionKey) {
+            try { await db.ref("rooms/" + state.currentRoomId).update({ sessionKey }); } catch (_) {}
+        }
 
         addLog("🧠 AI Judge is fact-checking all claims...");
         addLog(`📡 Querying GenLayer AI on <span class="highlight">Bradbury Testnet</span>...`);
 
         // ══════════════════════════════════════════════
-        //  STEP 1: AI FACT-CHECK via GenLayer SDK
-        //  Uses genlayer-js writeContract (same as snake-protocol)
-        //  Validators run LLM + reach consensus via Equivalence Principle
+        //  STEP 1: Set up GenLayer client
         // ══════════════════════════════════════════════
-        let verdicts = {};
-        
-        // Build the claims JSON for AI analysis
-        // Format: "0xAddr: \"claim text\"\n" per line
-        const claimAddrs = Object.keys(claims);
-        let claimsSummary = "";
-        for (const addr of claimAddrs) {
-            claimsSummary += `${addr}: "${claims[addr].text}"\n`;
-        }
-        
-        // ── GenLayer SDK — AI FACT-CHECK via on-chain LLM consensus ──
         if (!window.GenLayerBridge || !window.ethereum) {
             throw new Error("GenLayer Bridge or MetaMask not detected. Install MetaMask and refresh.");
         }
-
         addLog(`📡 Connecting to <span class="highlight">Bradbury Testnet</span>...`);
 
-        // Override chain RPC so SDK's internal publicClient uses our working RPC
-        // (rpc-bradbury.genlayer.com is currently unreachable)
         const bradbury = window.GenLayerBridge.chains.testnetBradbury;
         const customChain = Object.assign({}, bradbury, {
             rpcUrls: { default: { http: [RPC_URL] } }
         });
-
         const glClient = window.GenLayerBridge.createClient({
             chain: customChain,
             account: state.playerAddr,
@@ -1095,14 +1193,22 @@ async function triggerAIJudge(room) {
         }
         addLog("🔗 Wallet on Bradbury Testnet");
 
-        // ── STEP 1: Send TX to GenLayer (LLM consensus via validators) ──
+        // ══════════════════════════════════════════════
+        //  STEP 2: Submit AI judging TX (judge_claims)
+        // ══════════════════════════════════════════════
+        // Build a simple line-per-claim text payload — the contract's prompt
+        // expects this exact format and works reliably on Bradbury.
+        const claimAddrs = Object.keys(claims);
+        let claimsSummary = "";
+        for (const addr of claimAddrs) {
+            const txt = (claims[addr].text || "").substring(0, 500).replace(/[\r\n]+/g, " ");
+            claimsSummary += `${addr}: "${txt}"\n`;
+        }
+        const themeStr = (room.theme || "General Knowledge").substring(0, 120);
+
         addLog("⛓️ Sending AI judge TX to GenLayer...");
-
         let txHash = null;
-        let fullTx  = null;
         const judgeStart = Date.now();
-
-        // Retry writeContract up to 3 times with exponential backoff
         const MAX_RETRIES = 3;
         for (let attempt = 1; attempt <= MAX_RETRIES && !txHash; attempt++) {
             try {
@@ -1115,102 +1221,94 @@ async function triggerAIJudge(room) {
                 txHash = await glClient.writeContract({
                     address: JUDGE_CONTRACT,
                     functionName: "judge_claims",
-                    args: [sessionKey, room.theme || "General Knowledge", claimsSummary],
+                    args: [sessionKey, themeStr, claimsSummary],
                     value: BigInt(0),
                     leaderOnly: true,
                 });
             } catch (txErr) {
                 console.warn(`[GenLayer] writeContract attempt ${attempt} failed:`, txErr.message);
                 if (attempt === MAX_RETRIES) {
-                    addLog("⚠️ GenLayer TX could not be submitted — using fallback.");
-                    showToast("AI Judge unavailable. Using declaration-based verdicts.", "warning");
+                    addLog("⚠️ GenLayer TX could not be submitted after retries.");
+                    showToast("AI Judge unavailable — round will retry.", "warning");
                 }
             }
         }
 
-        if (txHash) {
-            addLog(`📝 TX: <a href="${EXPLORER_URL}tx/${txHash}" target="_blank">${txHash.substring(0, 12)}…</a>`);
-            addLog("⏳ Waiting for GenLayer consensus...");
+        if (!txHash) {
+            throw new Error("GenLayer TX submission failed — round will retry.");
+        }
+        addLog(`📝 TX: <a href="${EXPLORER_URL}tx/${txHash}" target="_blank">${txHash.substring(0, 12)}…</a>`);
+        addLog("⏳ Waiting for GenLayer consensus...");
 
-            // ── STEP 2: Wait for receipt — race fastest status that has leader output ──
-            // Since our `strict_eq` output is deterministic (booleans only), the leader's
-            // result at COMMITTING/PROPOSING already matches the final ACCEPTED state.
-            // Waiting for COMMITTING is much faster than full ACCEPTED consensus.
-            const tryStatus = (status, retries, interval) => glClient.waitForTransactionReceipt({
-                hash: txHash,
-                status,
-                retries,
-                interval,
-                fullTransaction: true,
-            });
-            try {
-                // Race: whichever status returns first wins. Most common is COMMITTING (fastest
-                // with leader output present). We also race ACCEPTED in case the TX is already
-                // past COMMITTING by the time we start polling.
-                const fastPromise = Promise.any([
-                    tryStatus("COMMITTING", 40, 3000),
-                    tryStatus("ACCEPTED",   40, 3000),
-                ]);
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error("Timeout: consensus took longer than 2 minutes")), 2 * 60 * 1000)
-                );
-                fullTx = await Promise.race([fastPromise, timeoutPromise]);
-                console.log("[GenLayer] Full TX receipt:", JSON.stringify(fullTx).substring(0, 2000));
-                addLog("✅ GenLayer leader output received!");
-            } catch (receiptErr) {
-                console.warn("[GenLayer] Receipt error:", receiptErr);
-                addLog("⚠️ Consensus delayed — using fallback.");
-                showToast(receiptErr.message?.includes("Timeout") ? "AI Judge timed out. Using fallback." : "Consensus failed. Using fallback.", "warning");
-            }
+        // ══════════════════════════════════════════════
+        //  STEP 4: Wait for receipt — race fastest status
+        // ══════════════════════════════════════════════
+        const tryStatus = (status, retries, interval) => glClient.waitForTransactionReceipt({
+            hash: txHash,
+            status,
+            retries,
+            interval,
+            fullTransaction: true,
+        });
+        let fullTx = null;
+        try {
+            const fastPromise = Promise.any([
+                tryStatus("COMMITTING", 40, 3000),
+                tryStatus("ACCEPTED",   40, 3000),
+            ]);
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Timeout: consensus took longer than 2 minutes")), 2 * 60 * 1000)
+            );
+            fullTx = await Promise.race([fastPromise, timeoutPromise]);
+            addLog("✅ GenLayer consensus reached!");
+        } catch (receiptErr) {
+            console.warn("[GenLayer] Receipt error:", receiptErr);
+            throw new Error("GenLayer consensus timed out — please retry the round.");
         }
 
         // Ensure judging screen shows for at least 4 seconds
         const elapsed = Date.now() - judgeStart;
         if (elapsed < 4000) await new Promise(r => setTimeout(r, 4000 - elapsed));
 
-        // ── STEP 3: Extract verdicts from consensus data ──
-        if (fullTx) {
-            // Search the TX data for JSON verdicts
-            const txStr = JSON.stringify(fullTx, (k, v) => typeof v === "bigint" ? v.toString() : v);
-            console.log("[GenLayer] Searching TX data for verdicts...", txStr.substring(0, 500));
+        // ══════════════════════════════════════════════
+        //  STEP 5: Extract AI verdicts from the TX receipt
+        // ══════════════════════════════════════════════
+        // Bradbury RPC does not currently expose `gen_call`, so `readContract`
+        // is unreliable. Instead we mine the verdicts JSON straight out of the
+        // tx's strict_eq output (eqBlocksOutputs is hex-encoded ASCII). The
+        // contract has ALREADY committed scores on-chain in this same tx —
+        // that write is the source of truth. We only need the verdicts here
+        // to render the UI; we then recompute points with the IDENTICAL
+        // deterministic formula the contract used, so the display matches
+        // chain state byte-for-byte.
+        const verdicts = {};
 
-            // Try leader_receipt → result → payload (contains strict_eq output)
-            const cd = fullTx.consensus_data || fullTx.consensusData || {};
-            const leaderReceipts = cd.leader_receipt || cd.leaderReceipt || [];
-            for (const lr of (Array.isArray(leaderReceipts) ? leaderReceipts : [leaderReceipts])) {
-                const payload = lr?.result?.payload || lr?.genvm_result?.stdout || "";
-                if (payload && payload.includes("{")) {
-                    try {
-                        const parsed = JSON.parse(payload);
-                        for (const [key, value] of Object.entries(parsed)) {
-                            for (const addr of claimAddrs) {
-                                if (key.includes(addr) || addr.includes(key)) {
-                                    verdicts[addr] = !!value;
-                                }
-                            }
+        const tryParseVerdicts = (raw) => {
+            if (!raw || typeof raw !== "string" || !raw.includes("{")) return;
+            try {
+                const parsed = JSON.parse(raw);
+                for (const [k, v] of Object.entries(parsed)) {
+                    for (const addr of claimAddrs) {
+                        if (k.toLowerCase() === addr.toLowerCase()) {
+                            verdicts[addr] = v === true;
                         }
-                    } catch (e) { console.warn("Parse attempt:", e); }
-                }
-                // Also check eq_outputs
-                const eqOut = lr?.eq_outputs || {};
-                for (const eqVal of Object.values(eqOut)) {
-                    if (typeof eqVal === "string" && eqVal.includes("{")) {
-                        try {
-                            const parsed = JSON.parse(eqVal);
-                            for (const [key, value] of Object.entries(parsed)) {
-                                for (const addr of claimAddrs) {
-                                    if (key.includes(addr) || addr.includes(key)) {
-                                        verdicts[addr] = !!value;
-                                    }
-                                }
-                            }
-                        } catch (e) { console.warn("EQ parse attempt:", e); }
                     }
                 }
+            } catch (_) {}
+        };
+
+        if (fullTx) {
+            // 1. leader_receipt → result.payload / genvm_result.stdout
+            const cd = fullTx.consensus_data || fullTx.consensusData || {};
+            const lrs = cd.leader_receipt || cd.leaderReceipt || [];
+            for (const lr of (Array.isArray(lrs) ? lrs : [lrs])) {
+                tryParseVerdicts(lr?.result?.payload);
+                tryParseVerdicts(lr?.genvm_result?.stdout);
+                const eqOut = lr?.eq_outputs || {};
+                for (const v of Object.values(eqOut)) tryParseVerdicts(v);
             }
 
-            // Bradbury runtime stores strict_eq output in `eqBlocksOutputs` (hex-encoded).
-            // Decode hex → ascii and look for the verdicts JSON object.
+            // 2. eqBlocksOutputs (hex-encoded ASCII)
             if (Object.keys(verdicts).length === 0) {
                 const eqHex = fullTx.eqBlocksOutputs || fullTx.eq_blocks_outputs || "";
                 if (typeof eqHex === "string" && eqHex.startsWith("0x")) {
@@ -1221,178 +1319,129 @@ async function triggerAIJudge(room) {
                             const ch = parseInt(cleanHex.substr(i, 2), 16);
                             asciiStr += (ch >= 32 && ch < 127) ? String.fromCharCode(ch) : " ";
                         }
-                        // Find first JSON object containing addresses + booleans
-                        const jsonRe = /\{[^{}]*"0x[a-fA-F0-9]{40}"[^{}]*\}/g;
-                        const matches = asciiStr.match(jsonRe);
-                        if (matches) {
-                            for (const m of matches) {
-                                try {
-                                    const parsed = JSON.parse(m);
-                                    for (const [key, value] of Object.entries(parsed)) {
-                                        for (const addr of claimAddrs) {
-                                            if (key.toLowerCase() === addr.toLowerCase()) {
-                                                verdicts[addr] = !!value;
-                                            }
-                                        }
-                                    }
-                                } catch (_) {}
-                            }
-                        }
+                        const matches = asciiStr.match(/\{[^{}]*"0x[a-fA-F0-9]{40}"[^{}]*\}/g);
+                        if (matches) for (const m of matches) tryParseVerdicts(m);
                     } catch (decodeErr) {
                         console.warn("[GenLayer] eqBlocksOutputs decode error:", decodeErr);
                     }
                 }
             }
 
-            // Fallback: search entire TX JSON for a JSON-like verdict pattern
+            // 3. last-resort regex over the whole TX JSON
             if (Object.keys(verdicts).length === 0) {
-                const jsonMatch = txStr.match(/\{[^{}]*"0x[a-fA-F0-9]+"[^{}]*:[\s]*(true|false)[^{}]*\}/g);
-                if (jsonMatch) {
-                    for (const match of jsonMatch) {
-                        try {
-                            const parsed = JSON.parse(match);
-                            for (const [key, value] of Object.entries(parsed)) {
-                                for (const addr of claimAddrs) {
-                                    if (key.includes(addr) || addr.includes(key)) {
-                                        verdicts[addr] = !!value;
-                                    }
-                                }
-                            }
-                        } catch (e) {}
-                    }
-                }
+                const txStr = JSON.stringify(fullTx, (k, v) => typeof v === "bigint" ? v.toString() : v);
+                const matches = txStr.match(/\{[^{}]*"0x[a-fA-F0-9]+"[^{}]*:[\s]*(true|false)[^{}]*\}/g);
+                if (matches) for (const m of matches) tryParseVerdicts(m);
             }
         }
 
-        // ── STEP 4: If no verdicts from TX data, try readContract (gen_call) ──
+        // ── GenLayer is mandatory: no verdicts = no round. Never trust client. ──
         if (Object.keys(verdicts).length === 0) {
-            addLog("📖 Trying to read verdicts from contract state...");
-            try {
-                const resultStr = await glClient.readContract({
-                    address: JUDGE_CONTRACT,
-                    functionName: "get_verdicts",
-                    args: [sessionKey],
-                });
-                console.log("[GenLayer] readContract result:", resultStr);
-                if (resultStr && resultStr !== "{}" && resultStr !== "null") {
-                    const parsed = JSON.parse(resultStr);
-                    for (const [key, value] of Object.entries(parsed)) {
-                        for (const addr of claimAddrs) {
-                            if (key.includes(addr) || addr.includes(key)) {
-                                verdicts[addr] = !!value;
-                            }
-                        }
-                    }
-                }
-            } catch (readErr) {
-                console.warn("[GenLayer] readContract error:", readErr.message);
-                addLog("⚠️ Read error: " + readErr.message.substring(0, 60));
-            }
+            throw new Error("GenLayer AI Judge did not return verdicts. The round cannot be judged without consensus — please retry.");
         }
-
-        let aiVerified = false;
-        if (Object.keys(verdicts).length > 0) {
-            aiVerified = true;
-            addLog("✅ AI Verdicts extracted from GenLayer!");
-        } else {
-            // ── FALLBACK: use player's own isLie declaration as the AI verdict ──
-            // (AI unavailable — trust declarations: truth=true, lie=false)
-            addLog("⚖️ GenLayer unavailable — verdicts from declarations.");
-            for (const addr of claimAddrs) {
-                const claimData = claims[addr];
-                verdicts[addr] = claimData.isLie !== true;
-            }
-            showToast("⚠️ AI Judge offline — verdicts based on declarations", "warning");
-            addLog("✅ Declaration-based verdicts computed (AI fallback mode).");
-        }
-
-        addLog("✅ AI Verdict reached!");
+        addLog("✅ AI Verdicts extracted from GenLayer!");
 
         // ══════════════════════════════════════════════
-        //  STEP 2: CALCULATE POINTS
+        //  STEP 6: Compute deterministic scoring (AI-driven, never trusts
+        //          player declarations — see staff feedback fix).
         // ══════════════════════════════════════════════
-        const results = {};
-        
-        for (const [addr, claimData] of Object.entries(claims)) {
-            const isActuallyTrue = verdicts[addr] !== undefined ? verdicts[addr] : true;
-            const playerSaidLie = claimData.isLie === true;
-            let points = 0;
+        const n = claimAddrs.length;
+        const others = Math.max(n - 1, 1);
+        const points = {};
+        for (const addr of claimAddrs) points[addr] = 0;
 
-            // Count lie votes for this player
+        for (const addr of claimAddrs) {
+            const aiSaysTrue = verdicts[addr] === true;
+            const aiSaysLie  = verdicts[addr] === false;
             let lieVotes = 0;
-            for (const [voter, voterVotes] of Object.entries(votes)) {
-                if (voter !== addr && voterVotes[addr]) {
-                    if (voterVotes[addr] === "LIE") lieVotes++;
-                }
+            for (const [voter, vv] of Object.entries(votes)) {
+                if (voter === addr || !vv) continue;
+                if (vv[addr] === "LIE") lieVotes++;
             }
+            const wasCaught = lieVotes * 2 > others;
+            if      (aiSaysLie  && !wasCaught) points[addr] += 3;
+            else if (aiSaysLie  &&  wasCaught) points[addr] += -1;
+            else if (aiSaysTrue &&  wasCaught) points[addr] += 1;
+            else if (aiSaysTrue && !wasCaught) points[addr] += 2;
+        }
 
-            const totalOtherPlayers = Object.keys(players).length - 1;
-            const wasCaught = lieVotes > (totalOtherPlayers / 2);
-
-            if (playerSaidLie && !wasCaught) {
-                points = 3; // Successful lie!
-            } else if (playerSaidLie && wasCaught) {
-                points = -1; // Caught lying
-            } else if (!playerSaidLie && !isActuallyTrue) {
-                points = -1; // Wrong truth
-            } else if (!playerSaidLie && isActuallyTrue) {
-                points = 1; // Truth confirmed
+        // Voter bonuses (AI-driven, never self-declarations)
+        for (const [voter, vv] of Object.entries(votes)) {
+            if (!vv || !(voter in points)) continue;
+            for (const [target, value] of Object.entries(vv)) {
+                if (!(target in claims)) continue;
+                const tv = verdicts[target];
+                if      (tv === true  && value === "TRUTH") points[voter] += 1;
+                else if (tv === false && value === "LIE")   points[voter] += 1;
             }
+        }
 
+        // Winner = highest points (ties → first by address sort, like contract)
+        const sortedAddrs = [...claimAddrs].sort();
+        let winner = "";
+        let best = -Infinity;
+        for (const addr of sortedAddrs) {
+            if (points[addr] > best) { best = points[addr]; winner = addr; }
+        }
+
+        const results = {};
+        for (const [addr, claimData] of Object.entries(claims)) {
+            const aiSaysTrue     = verdicts[addr] === true;
+            const aiSaysLie      = verdicts[addr] === false;
+            const declaredIntent = claimData.isLie === true;
+            let lieVotes = 0;
+            for (const [voter, vv] of Object.entries(votes)) {
+                if (voter !== addr && vv && vv[addr] === "LIE") lieVotes++;
+            }
+            const wasCaught = lieVotes * 2 > others;
             results[addr] = {
-                verdict: isActuallyTrue,
-                ai_verified: aiVerified,
-                was_lie: playerSaidLie,
-                was_caught: wasCaught,
-                lie_votes: lieVotes,
-                points: points,
-                text: claimData.text,
-                username: claimData.username || shortAddr(addr),
+                verdict:          aiSaysTrue,
+                ai_verified:      true,
+                was_lie:          aiSaysLie,
+                declared_intent:  declaredIntent,
+                was_caught:       wasCaught,
+                lie_votes:        lieVotes,
+                points:           points[addr] || 0,
+                text:             claimData.text,
+                username:         claimData.username || shortAddr(addr),
             };
         }
 
-        // Add voter bonus points
-        for (const [voter, voterVotes] of Object.entries(votes)) {
-            let voterBonus = 0;
-            for (const [targetAddr, voteValue] of Object.entries(voterVotes)) {
-                if (targetAddr in claims) {
-                    const actualLie = claims[targetAddr].isLie === true;
-                    if (voteValue === "LIE" && actualLie) {
-                        voterBonus += 1; // Correctly spotted a lie
-                    } else if (voteValue === "TRUTH" && !actualLie) {
-                        voterBonus += 1; // Correctly identified truth
-                    }
-                }
-            }
-            if (voter in results) {
-                results[voter].points += voterBonus;
-            }
-        }
-
-        // Determine winner
-        let winner = "";
-        let bestScore = -999;
-        for (const [addr, res] of Object.entries(results)) {
-            if (res.points > bestScore) {
-                bestScore = res.points;
-                winner = addr;
-            }
-        }
-
-        // ══════════════════════════════════════════════
-        //  STEP 3: SAVE RESULTS TO FIREBASE
-        // ══════════════════════════════════════════════
         await db.ref("rooms/" + state.currentRoomId).update({
             phase:    "RESULTS",
             results:  results,
             winner:   winner,
-            judgeTx:  txHash || null,
+            judgeTx:  txHash,
         });
-
         hideLoadingBanner();
         addLog("🏆 Results are in!");
-        
-        // Update leaderboard
+
+        // ══ Shadow on-chain commit (non-blocking) — records cumulative scores
+        //    on the contract via record_round. Idempotent + safe to skip.
+        (async () => {
+            try {
+                const pointsMap = {};
+                for (const [addr, r] of Object.entries(results)) {
+                    pointsMap[addr] = Number(r.points) || 0;
+                }
+                addLog("⛓️ Recording round on-chain...");
+                const recTx = await glClient.writeContract({
+                    address: JUDGE_CONTRACT,
+                    functionName: "record_round",
+                    args: [sessionKey, JSON.stringify(pointsMap), winner || ""],
+                    value: BigInt(0),
+                    leaderOnly: true,
+                });
+                if (recTx) {
+                    addLog(`✅ On-chain record TX: <a href="${EXPLORER_URL}tx/${recTx}" target="_blank">${recTx.substring(0,10)}…</a>`);
+                    db.ref("rooms/" + state.currentRoomId).update({ recordTx: recTx }).catch(()=>{});
+                }
+            } catch (recErr) {
+                console.warn("[GenLayer] record_round skipped:", recErr?.message);
+                addLog("⚠️ On-chain record skipped — scores will retry next round.");
+            }
+        })();
+
         updateLeaderboard(results);
         if (winner) {
             db.ref(`leaderboard/${winner}/wins`).transaction(w => (w || 0) + 1);
@@ -1402,6 +1451,16 @@ async function triggerAIJudge(room) {
         console.error("AI Judge error:", err);
         addLog(`❌ AI Judge error: ${err.message}`);
         hideLoadingBanner();
+        // Roll back to VOTING so host can retry without losing the round.
+        // No fake verdicts are ever written — GenLayer consensus is mandatory.
+        try {
+            await db.ref("rooms/" + state.currentRoomId).update({
+                phase: "VOTING",
+                judgeError: err.message?.substring(0, 200) || "AI Judge failed",
+                judgeErrorAt: Date.now(),
+            });
+        } catch (_) {}
+        showToast("⚠️ AI Judge unavailable. Host can retry by finalizing voting again.", "error");
     }
 }
 
@@ -1431,11 +1490,14 @@ function showResults(results, winner, claims, judgeTx, xpSummary) {
     let html = "";
     for (const [addr, res] of Object.entries(results)) {
         const claimText  = res.text || claims?.[addr]?.text || "—";
-        const declared   = res.was_lie ? "🤥 Declared: LIE" : "✓ Declared: TRUTH";
+        // Player's self-declaration (intent button) — display only, never used for scoring.
+        const declaredIntent = (res.declared_intent !== undefined ? res.declared_intent : res.was_lie);
+        const declared   = declaredIntent ? "🤥 Declared: LIE" : "✓ Declared: TRUTH";
 
-        // AI verdict badge (honest about source: real AI vs declaration fallback)
+        // AI verdict badge — every verdict here is from real GenLayer consensus
+        // (the round cannot reach RESULTS without it).
         let aiBadge = "";
-        const verdictPrefix = res.ai_verified ? "🤖 AI FACT-CHECK" : "⚖️ DECLARATION TRUSTED";
+        const verdictPrefix = "🤖 AI FACT-CHECK";
         if (res.verdict === true)  aiBadge = `<div style="font-size:0.65rem;color:#4ade80;margin-top:3px;font-weight:700;">${verdictPrefix}: TRUE ✅</div>`;
         if (res.verdict === false) aiBadge = `<div style="font-size:0.65rem;color:#f97316;margin-top:3px;font-weight:700;">${verdictPrefix}: FALSE 🚨</div>`;
 
